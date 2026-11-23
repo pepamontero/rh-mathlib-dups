@@ -52,6 +52,8 @@ jobs:
           git remote add upstream https://github.com/leanprover-community/riemann-hypothesis.git
           git fetch -q --depth=200 upstream "$BASE"
           mb=$(git merge-base HEAD FETCH_HEAD)
+          echo "PATCH_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "BASE_SHA=$mb" >> "$GITHUB_ENV"
           git diff --name-only --diff-filter=AM "$mb" HEAD -- 'src/*.lean' \
             | sed -e 's#^src/##' -e 's#\.lean$##' -e 's#/#.#g' > "$RUNNER_TEMP/changed.txt"
           echo "$(wc -l < "$RUNNER_TEMP/changed.txt") changed modules (base $mb)"
@@ -91,10 +93,14 @@ jobs:
             | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
-      - name: Fetch prebuilt oleans (Mathlib + project cache)
+      # The project cache is keyed to the exact `src` tree, so fetch it for the unpatched base
+      # and only then switch to the patch: Lake rebuilds just the modules whose inputs changed.
+      - name: Fetch prebuilt oleans for the base (Mathlib + project cache)
         working-directory: rh
         run: |
+          git checkout -q --detach "$BASE_SHA"
           lake exe cache get
+          git checkout -q --detach "$PATCH_SHA"
           df -h /
 
       - name: Build
