@@ -99,7 +99,14 @@ jobs:
         working-directory: rh
         run: |
           git checkout -q --detach "$BASE_SHA"
-          lake exe cache get
+          # The cache server sometimes times out on single files (HTTP 524) and the download
+          # does not retry; files already fetched stay in .lake/cache, so retrying is cheap.
+          for attempt in 1 2 3 4; do
+            if lake exe cache get; then break; fi
+            if [ "$attempt" = 4 ]; then exit 1; fi
+            echo "::warning::cache get failed (attempt $attempt), retrying"
+            sleep 30
+          done
           git checkout -q --detach "$PATCH_SHA"
           df -h /
 
