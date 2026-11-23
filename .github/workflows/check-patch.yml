@@ -1,0 +1,127 @@
+name: Check a riemann-hypothesis patch
+
+# Builds the modules a branch of riemann-hypothesis (usually a fork) changes, on top of the
+# prebuilt cache, so a patch can be compile-checked before it is proposed upstream.
+# Optionally also builds every module that imports a changed one.
+run-name: "check ${{ inputs.repo }}@${{ inputs.ref }}"
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repository holding the patch"
+        default: "pepamontero/riemann-hypothesis"
+      ref:
+        description: "Branch or commit with the patch"
+        default: "dupes"
+      base:
+        description: "Branch or commit of leanprover-community/riemann-hypothesis it is based on"
+        default: "main"
+      downstream:
+        description: "Also build every module that (transitively) imports a changed module"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null || true
+          df -h /
+
+      - name: Check out the patch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          path: rh
+          fetch-depth: 200
+
+      - name: List changed modules
+        working-directory: rh
+        env:
+          BASE: ${{ inputs.base }}
+        run: |
+          git remote add upstream https://github.com/leanprover-community/riemann-hypothesis.git
+          git fetch -q --depth=200 upstream "$BASE"
+          mb=$(git merge-base HEAD FETCH_HEAD)
+          git diff --name-only --diff-filter=AM "$mb" HEAD -- 'src/*.lean' \
+            | sed -e 's#^src/##' -e 's#\.lean$##' -e 's#/#.#g' > "$RUNNER_TEMP/changed.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/changed.txt") changed modules (base $mb)"
+          cat "$RUNNER_TEMP/changed.txt"
+
+      - name: List downstream modules
+        if: ${{ inputs.downstream }}
+        working-directory: rh
+        run: |
+          # Reverse import graph, then everything reachable from the changed modules.
+          python3 - "$RUNNER_TEMP/changed.txt" > "$RUNNER_TEMP/downstream.txt" <<'EOF'
+          import re, sys
+          from collections import defaultdict
+          from pathlib import Path
+          rev = defaultdict(set)
+          imp = re.compile(r"^\s*(?:public\s+)?(?:meta\s+)?import\s+(?:all\s+)?(\S+)")
+          for p in Path("src").rglob("*.lean"):
+              mod = ".".join(p.relative_to("src").with_suffix("").parts)
+              for line in p.read_text(errors="replace").splitlines()[:400]:
+                  if m := imp.match(line):
+                      rev[m.group(1)].add(mod)
+          todo = [l.strip() for l in open(sys.argv[1]) if l.strip()]
+          seen = set(todo)
+          while todo:
+              for d in rev[todo.pop()]:
+                  if d not in seen:
+                      seen.add(d)
+                      todo.append(d)
+          print("\n".join(sorted(seen)))
+          EOF
+          echo "$(wc -l < "$RUNNER_TEMP/downstream.txt") modules to build including downstream"
+          cp "$RUNNER_TEMP/downstream.txt" "$RUNNER_TEMP/changed.txt"
+
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch prebuilt oleans (Mathlib + project cache)
+        working-directory: rh
+        run: |
+          lake exe cache get
+          df -h /
+
+      - name: Build
+        working-directory: rh
+        run: |
+          set -o pipefail
+          xargs -a "$RUNNER_TEMP/changed.txt" lake build 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## ${{ inputs.repo }}@${{ inputs.ref }}"
+            echo
+            echo "$(wc -l < "$RUNNER_TEMP/changed.txt") modules built."
+            echo
+            if grep -q '^error' "$RUNNER_TEMP/build.log" 2>/dev/null; then
+              echo '```'
+              grep -A8 '^error' "$RUNNER_TEMP/build.log" | head -n 200
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
