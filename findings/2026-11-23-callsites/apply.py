@@ -117,6 +117,11 @@ def main(rh):
             new = replace_token(lines[i], r["token"], r["mathlib_name"])
             for pat, rep in FIX.get(short, []):
                 new = re.sub(pat, rep, new)
+                # A named argument may start the next line.
+                if i + 1 < len(lines) and new.rstrip().endswith(r["mathlib_name"]):
+                    joined = re.sub(pat, rep, r["mathlib_name"] + " " + lines[i + 1].lstrip())
+                    indent = lines[i + 1][: len(lines[i + 1]) - len(lines[i + 1].lstrip())]
+                    lines[i + 1] = indent + joined[len(r["mathlib_name"]) + 1:]
             if new == lines[i]:
                 sys.exit(f"{path}:{r['line']}: `{r['token']}` not found")
             lines[i] = new
